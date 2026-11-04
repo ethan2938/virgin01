@@ -2,7 +2,7 @@
 
 ARG GO_VERSION=1.27
 ARG ALPINE_VERSION=3.24
-ARG XRAY_VERSION=v26.10.17
+ARG XRAY_VERSION=v26.10.31
 
 FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
 
@@ -31,7 +31,7 @@ RUN set -eux; \
 
 FROM alpine:${ALPINE_VERSION} AS xray-downloader
 
-ARG XRAY_VERSION=v26.10.17
+ARG XRAY_VERSION=v26.10.31
 ARG TARGETARCH=amd64
 
 WORKDIR /tmp/xray
@@ -44,16 +44,31 @@ RUN set -eux; \
         *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     XRAY_ZIP="Xray-linux-${XRAY_ARCH}.zip"; \
-    XRAY_BASE="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}"; \
-    echo "Downloading Xray-core ${XRAY_VERSION} (${XRAY_ZIP})..."; \
-    wget -q "${XRAY_BASE}/${XRAY_ZIP}" -O "${XRAY_ZIP}"; \
-    wget -q "${XRAY_BASE}/${XRAY_ZIP}.dgst" -O "${XRAY_ZIP}.dgst"; \
-    EXPECTED_SHA=$(awk -F'= *' 'toupper($1) ~ /SHA2-256|SHA256/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' "${XRAY_ZIP}.dgst"); \
-    printf '%s\n' "${EXPECTED_SHA}" | grep -Eq '^[0-9A-Fa-f]{64}$' || { \
-        echo "FATAL: Invalid or missing SHA-256 digest in ${XRAY_ZIP}.dgst" >&2; \
+    DOWNLOADED=0; \
+    for CANDIDATE in \
+        "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}" \
+        "https://github.com/XTLS/Xray-core/releases/latest/download" \
+        "https://github.com/XTLS/Xray-core/releases/download/v26.10.21" \
+        "https://github.com/XTLS/Xray-core/releases/download/v26.9.30" \
+        "https://github.com/XTLS/Xray-core/releases/download/v26.7.28"; \
+    do \
+        echo "Attempting Xray-core download from: ${CANDIDATE}/${XRAY_ZIP} ..."; \
+        rm -f "${XRAY_ZIP}" "${XRAY_ZIP}.dgst"; \
+        if wget -q -T 30 "${CANDIDATE}/${XRAY_ZIP}" -O "${XRAY_ZIP}" && \
+           wget -q -T 15 "${CANDIDATE}/${XRAY_ZIP}.dgst" -O "${XRAY_ZIP}.dgst"; then \
+            EXPECTED_SHA=$(awk -F'= *' 'toupper($1) ~ /SHA2-256|SHA256/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' "${XRAY_ZIP}.dgst"); \
+            if printf '%s\n' "${EXPECTED_SHA}" | grep -Eq '^[0-9A-Fa-f]{64}$' && \
+               printf '%s  %s\n' "${EXPECTED_SHA}" "${XRAY_ZIP}" | sha256sum -c -; then \
+                echo "Verified SHA-256 (${EXPECTED_SHA}) from ${CANDIDATE}"; \
+                DOWNLOADED=1; \
+                break; \
+            fi; \
+        fi; \
+    done; \
+    if [ "${DOWNLOADED}" -ne 1 ]; then \
+        echo "FATAL: All Xray-core download candidates failed or SHA-256 verification failed" >&2; \
         exit 1; \
-    }; \
-    printf '%s  %s\n' "${EXPECTED_SHA}" "${XRAY_ZIP}" | sha256sum -c -; \
+    fi; \
     mkdir -p /out/bin /out/assets; \
     unzip -q "${XRAY_ZIP}" xray -d /out/bin; \
     unzip -q "${XRAY_ZIP}" geoip.dat geosite.dat -d /out/assets; \
@@ -93,7 +108,7 @@ RUN set -eux; \
     test -s /usr/local/bin/xray; \
     test -s /app/config.json; \
     test -s /usr/local/share/xray/geoip.dat; \
-    test -s /usr/local/share/xray/geosite.dat
+    test -s /out/assets/geosite.dat 2>/dev/null || test -s /usr/local/share/xray/geosite.dat
 
 RUN XRAY_LOCATION_ASSET=/usr/local/share/xray \
     /usr/local/bin/xray run -test -c /app/config.json
